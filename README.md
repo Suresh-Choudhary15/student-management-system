@@ -4,8 +4,8 @@ A full-stack web application for managing student groups, assignments, and submi
 
 ## 🚀 Live Demo
 
-- **Frontend**: [Vercel Link - Add after deployment]
-- **Backend API**: [Render Link - Add after deployment]
+- **Frontend**: [student-management-system-eta-nine.vercel.app](https://student-management-system-eta-nine.vercel.app/login)
+- **Backend API**: https://student-management-system-226p.onrender.com
 - **Database**: MongoDB Atlas Cloud
 
 ## ✨ Enhanced Features (Round 2)
