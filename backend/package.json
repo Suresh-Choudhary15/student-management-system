@@ -1,7 +1,7 @@
 {
-  "name": "student-management-backend",
-  "version": "1.0.0",
-  "description": "Backend for Student Management System",
+  "name": "student-management-backend-v2",
+  "version": "2.0.0",
+  "description": "Backend for Student Management System - Round 2",
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
@@ -12,7 +12,7 @@
   "license": "ISC",
   "dependencies": {
     "express": "^4.19.2",
-    "pg": "^8.12.0",
+    "mongoose": "^8.0.3",
     "bcryptjs": "^2.4.3",
     "jsonwebtoken": "^9.0.2",
     "cors": "^2.8.5",

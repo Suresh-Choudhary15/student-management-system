@@ -1,14 +1,14 @@
 const express = require("express");
 const router = express.Router();
-const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
-const { pool } = require("../config/database");
+const User = require("../models/User");
 
 // Register
 router.post("/register", async (req, res) => {
   try {
     const { email, password, name, role } = req.body;
 
+    // Validate input
     if (!email || !password || !name || !role) {
       return res.status(400).json({ error: "All fields are required" });
     }
@@ -17,33 +17,35 @@ router.post("/register", async (req, res) => {
       return res.status(400).json({ error: "Invalid role" });
     }
 
-    const existingUser = await pool.query(
-      "SELECT * FROM users WHERE email = $1",
-      [email]
-    );
-
-    if (existingUser.rows.length > 0) {
+    // Check if user exists
+    const existingUser = await User.findOne({ email });
+    if (existingUser) {
       return res.status(400).json({ error: "User already exists" });
     }
 
-    const hashedPassword = await bcrypt.hash(password, 10);
+    // Create user
+    const user = await User.create({
+      email,
+      password,
+      name,
+      role,
+    });
 
-    const result = await pool.query(
-      "INSERT INTO users (email, password, name, role) VALUES ($1, $2, $3, $4) RETURNING id, email, name, role, created_at",
-      [email, hashedPassword, name, role]
-    );
-
-    const user = result.rows[0];
-
+    // Generate JWT
     const token = jwt.sign(
-      { id: user.id, email: user.email, role: user.role },
+      { id: user._id, email: user.email, role: user.role },
       process.env.JWT_SECRET,
       { expiresIn: "7d" }
     );
 
     res.status(201).json({
       message: "User registered successfully",
-      user,
+      user: {
+        id: user._id,
+        email: user.email,
+        name: user.name,
+        role: user.role,
+      },
       token,
     });
   } catch (error) {
@@ -61,32 +63,35 @@ router.post("/login", async (req, res) => {
       return res.status(400).json({ error: "Email and password are required" });
     }
 
-    const result = await pool.query("SELECT * FROM users WHERE email = $1", [
-      email,
-    ]);
-
-    if (result.rows.length === 0) {
+    // Find user and include password for comparison
+    const user = await User.findOne({ email }).select("+password");
+    if (!user) {
       return res.status(401).json({ error: "Invalid credentials" });
     }
 
-    const user = result.rows[0];
-
-    const isValidPassword = await bcrypt.compare(password, user.password);
+    // Verify password
+    const isValidPassword = await user.comparePassword(password);
     if (!isValidPassword) {
       return res.status(401).json({ error: "Invalid credentials" });
     }
 
+    // Generate JWT
     const token = jwt.sign(
-      { id: user.id, email: user.email, role: user.role },
+      { id: user._id, email: user.email, role: user.role },
       process.env.JWT_SECRET,
       { expiresIn: "7d" }
     );
 
-    delete user.password;
-
     res.json({
       message: "Login successful",
-      user,
+      user: {
+        id: user._id,
+        email: user.email,
+        name: user.name,
+        role: user.role,
+        enrolledCourses: user.enrolledCourses,
+        teachingCourses: user.teachingCourses,
+      },
       token,
     });
   } catch (error) {

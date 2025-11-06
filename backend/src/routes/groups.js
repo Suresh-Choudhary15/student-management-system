@@ -1,89 +1,107 @@
 const express = require("express");
 const router = express.Router();
-const { pool } = require("../config/database");
+const Group = require("../models/Group");
+const Course = require("../models/Course");
+const User = require("../models/User");
 const { authenticateToken } = require("../middleware/auth");
 
+// Get all groups (filtered by course)
 router.get("/", authenticateToken, async (req, res) => {
   try {
-    const result = await pool.query(`
-      SELECT g.*, u.name as creator_name,
-      COUNT(DISTINCT gm.user_id) as member_count
-      FROM groups g
-      LEFT JOIN users u ON g.created_by = u.id
-      LEFT JOIN group_members gm ON g.id = gm.group_id
-      GROUP BY g.id, u.name
-      ORDER BY g.created_at DESC
-    `);
-    res.json(result.rows);
+    const { courseId } = req.query;
+    const query = courseId ? { course: courseId } : {};
+
+    const groups = await Group.find(query)
+      .populate("leader", "name email")
+      .populate("members", "name email")
+      .populate("course", "name code")
+      .sort("-createdAt");
+
+    res.json(groups);
   } catch (error) {
     console.error("Get groups error:", error);
     res.status(500).json({ error: "Failed to fetch groups" });
   }
 });
 
+// Get user's groups
+router.get("/my-groups", authenticateToken, async (req, res) => {
+  try {
+    const groups = await Group.find({
+      members: req.user.id,
+    })
+      .populate("leader", "name email")
+      .populate("members", "name email")
+      .populate("course", "name code")
+      .sort("-createdAt");
+
+    res.json(groups);
+  } catch (error) {
+    console.error("Get user groups error:", error);
+    res.status(500).json({ error: "Failed to fetch user groups" });
+  }
+});
+
+// Create new group
 router.post("/", authenticateToken, async (req, res) => {
   try {
-    const { name } = req.body;
+    const { name, courseId } = req.body;
 
-    if (!name || name.trim() === "") {
-      return res.status(400).json({ error: "Group name is required" });
+    if (!name || !courseId) {
+      return res
+        .status(400)
+        .json({ error: "Group name and course are required" });
     }
 
-    const client = await pool.connect();
-    try {
-      await client.query("BEGIN");
-
-      const groupResult = await client.query(
-        "INSERT INTO groups (name, created_by) VALUES ($1, $2) RETURNING *",
-        [name, req.user.id]
-      );
-
-      const group = groupResult.rows[0];
-
-      await client.query(
-        "INSERT INTO group_members (group_id, user_id) VALUES ($1, $2)",
-        [group.id, req.user.id]
-      );
-
-      await client.query("COMMIT");
-
-      res.status(201).json({ message: "Group created successfully", group });
-    } catch (error) {
-      await client.query("ROLLBACK");
-      throw error;
-    } finally {
-      client.release();
+    // Verify course exists and user is enrolled
+    const course = await Course.findById(courseId);
+    if (!course) {
+      return res.status(404).json({ error: "Course not found" });
     }
+
+    // Check if student is enrolled in course
+    if (req.user.role === "student" && !course.students.includes(req.user.id)) {
+      return res
+        .status(403)
+        .json({ error: "You must be enrolled in this course" });
+    }
+
+    // Create group with creator as leader
+    const group = await Group.create({
+      name,
+      course: courseId,
+      leader: req.user.id,
+      members: [req.user.id],
+      createdBy: req.user.id,
+    });
+
+    const populatedGroup = await Group.findById(group._id)
+      .populate("leader", "name email")
+      .populate("members", "name email")
+      .populate("course", "name code");
+
+    res.status(201).json({
+      message: "Group created successfully",
+      group: populatedGroup,
+    });
   } catch (error) {
     console.error("Create group error:", error);
     res.status(500).json({ error: "Failed to create group" });
   }
 });
 
+// Get group details
 router.get("/:id", authenticateToken, async (req, res) => {
   try {
-    const { id } = req.params;
+    const group = await Group.findById(req.params.id)
+      .populate("leader", "name email")
+      .populate("members", "name email")
+      .populate("course", "name code")
+      .populate("createdBy", "name email");
 
-    const groupResult = await pool.query(
-      "SELECT g.*, u.name as creator_name FROM groups g LEFT JOIN users u ON g.created_by = u.id WHERE g.id = $1",
-      [id]
-    );
-
-    if (groupResult.rows.length === 0) {
+    if (!group) {
       return res.status(404).json({ error: "Group not found" });
     }
-
-    const membersResult = await pool.query(
-      `SELECT u.id, u.name, u.email, u.role, gm.joined_at 
-       FROM group_members gm 
-       JOIN users u ON gm.user_id = u.id 
-       WHERE gm.group_id = $1 
-       ORDER BY gm.joined_at`,
-      [id]
-    );
-
-    const group = groupResult.rows[0];
-    group.members = membersResult.rows;
 
     res.json(group);
   } catch (error) {
@@ -92,98 +110,178 @@ router.get("/:id", authenticateToken, async (req, res) => {
   }
 });
 
+// Add member to group
 router.post("/:id/members", authenticateToken, async (req, res) => {
   try {
-    const { id } = req.params;
-    const { userEmail, userId } = req.body;
+    const { userId, userEmail } = req.body;
+    const groupId = req.params.id;
 
-    const groupResult = await pool.query("SELECT * FROM groups WHERE id = $1", [
-      id,
-    ]);
-    if (groupResult.rows.length === 0) {
+    const group = await Group.findById(groupId).populate("course");
+    if (!group) {
       return res.status(404).json({ error: "Group not found" });
     }
 
-    let targetUserId = userId;
-
-    if (userEmail && !userId) {
-      const userResult = await pool.query(
-        "SELECT id FROM users WHERE email = $1",
-        [userEmail]
-      );
-      if (userResult.rows.length === 0) {
-        return res
-          .status(404)
-          .json({ error: "User not found with this email" });
-      }
-      targetUserId = userResult.rows[0].id;
+    // Only group leader or creator can add members
+    if (
+      !group.leader.equals(req.user.id) &&
+      !group.createdBy.equals(req.user.id)
+    ) {
+      return res
+        .status(403)
+        .json({ error: "Only group leader can add members" });
     }
 
-    if (!targetUserId) {
-      return res.status(400).json({ error: "User email or ID is required" });
+    // Find user to add
+    let targetUser;
+    if (userId) {
+      targetUser = await User.findById(userId);
+    } else if (userEmail) {
+      targetUser = await User.findOne({ email: userEmail });
+    } else {
+      return res.status(400).json({ error: "User ID or email is required" });
     }
 
-    const existingMember = await pool.query(
-      "SELECT * FROM group_members WHERE group_id = $1 AND user_id = $2",
-      [id, targetUserId]
-    );
+    if (!targetUser) {
+      return res.status(404).json({ error: "User not found" });
+    }
 
-    if (existingMember.rows.length > 0) {
+    // Check if user is enrolled in the course
+    if (!group.course.students.includes(targetUser._id)) {
+      return res
+        .status(400)
+        .json({ error: "User must be enrolled in the course" });
+    }
+
+    // Check if already a member
+    if (group.members.includes(targetUser._id)) {
       return res.status(400).json({ error: "User is already a member" });
     }
 
-    await pool.query(
-      "INSERT INTO group_members (group_id, user_id) VALUES ($1, $2)",
-      [id, targetUserId]
-    );
+    // Add member
+    group.members.push(targetUser._id);
+    await group.save();
 
-    res.status(201).json({ message: "Member added successfully" });
+    const updatedGroup = await Group.findById(groupId)
+      .populate("leader", "name email")
+      .populate("members", "name email")
+      .populate("course", "name code");
+
+    res.json({
+      message: "Member added successfully",
+      group: updatedGroup,
+    });
   } catch (error) {
     console.error("Add member error:", error);
     res.status(500).json({ error: "Failed to add member" });
   }
 });
 
+// Remove member from group
 router.delete("/:id/members/:userId", authenticateToken, async (req, res) => {
   try {
     const { id, userId } = req.params;
 
-    const result = await pool.query(
-      "DELETE FROM group_members WHERE group_id = $1 AND user_id = $2 RETURNING *",
-      [id, userId]
-    );
-
-    if (result.rows.length === 0) {
-      return res.status(404).json({ error: "Member not found in group" });
+    const group = await Group.findById(id);
+    if (!group) {
+      return res.status(404).json({ error: "Group not found" });
     }
 
-    res.json({ message: "Member removed successfully" });
+    // Only group leader can remove members (except themselves)
+    if (!group.leader.equals(req.user.id)) {
+      return res
+        .status(403)
+        .json({ error: "Only group leader can remove members" });
+    }
+
+    // Cannot remove the leader
+    if (group.leader.equals(userId)) {
+      return res.status(400).json({ error: "Cannot remove group leader" });
+    }
+
+    // Remove member
+    group.members = group.members.filter((m) => !m.equals(userId));
+    await group.save();
+
+    const updatedGroup = await Group.findById(id)
+      .populate("leader", "name email")
+      .populate("members", "name email");
+
+    res.json({
+      message: "Member removed successfully",
+      group: updatedGroup,
+    });
   } catch (error) {
     console.error("Remove member error:", error);
     res.status(500).json({ error: "Failed to remove member" });
   }
 });
 
-router.get("/user/my-groups", authenticateToken, async (req, res) => {
+// Change group leader
+router.put("/:id/leader", authenticateToken, async (req, res) => {
   try {
-    const result = await pool.query(
-      `
-      SELECT g.*, u.name as creator_name,
-      COUNT(DISTINCT gm.user_id) as member_count
-      FROM groups g
-      LEFT JOIN users u ON g.created_by = u.id
-      LEFT JOIN group_members gm ON g.id = gm.group_id
-      WHERE g.id IN (SELECT group_id FROM group_members WHERE user_id = $1)
-      GROUP BY g.id, u.name
-      ORDER BY g.created_at DESC
-    `,
-      [req.user.id]
-    );
+    const { newLeaderId } = req.body;
+    const groupId = req.params.id;
 
-    res.json(result.rows);
+    const group = await Group.findById(groupId);
+    if (!group) {
+      return res.status(404).json({ error: "Group not found" });
+    }
+
+    // Only current leader can transfer leadership
+    if (!group.leader.equals(req.user.id)) {
+      return res
+        .status(403)
+        .json({ error: "Only current leader can transfer leadership" });
+    }
+
+    // Check if new leader is a member
+    if (!group.members.includes(newLeaderId)) {
+      return res
+        .status(400)
+        .json({ error: "New leader must be a group member" });
+    }
+
+    group.leader = newLeaderId;
+    await group.save();
+
+    const updatedGroup = await Group.findById(groupId)
+      .populate("leader", "name email")
+      .populate("members", "name email");
+
+    res.json({
+      message: "Group leader updated successfully",
+      group: updatedGroup,
+    });
   } catch (error) {
-    console.error("Get user groups error:", error);
-    res.status(500).json({ error: "Failed to fetch user groups" });
+    console.error("Change leader error:", error);
+    res.status(500).json({ error: "Failed to change group leader" });
+  }
+});
+
+// Delete group
+router.delete("/:id", authenticateToken, async (req, res) => {
+  try {
+    const group = await Group.findById(req.params.id);
+    if (!group) {
+      return res.status(404).json({ error: "Group not found" });
+    }
+
+    // Only creator or leader can delete
+    if (
+      !group.createdBy.equals(req.user.id) &&
+      !group.leader.equals(req.user.id)
+    ) {
+      return res
+        .status(403)
+        .json({ error: "Unauthorized to delete this group" });
+    }
+
+    await Group.findByIdAndDelete(req.params.id);
+
+    res.json({ message: "Group deleted successfully" });
+  } catch (error) {
+    console.error("Delete group error:", error);
+    res.status(500).json({ error: "Failed to delete group" });
   }
 });
 

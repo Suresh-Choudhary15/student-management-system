@@ -1,597 +1,514 @@
 import React, { useState, useEffect } from "react";
+import { useNavigate } from "react-router-dom";
+import { motion, AnimatePresence } from "framer-motion";
 import axios from "axios";
 import { useAuth } from "../context/AuthContext";
+import CourseCard from "../components/CourseCard";
+import LoadingSpinner from "../components/LoadingSpinner";
+import EmptyState from "../components/EmptyState";
+import ProgressBar from "../components/ProgressBar";
 
 const StudentDashboard = () => {
   const { user, logout, API_URL } = useAuth();
-  const [activeTab, setActiveTab] = useState("assignments");
+  const navigate = useNavigate();
+  const [activeTab, setActiveTab] = useState("courses");
 
-  const [groups, setGroups] = useState([]);
-  const [myGroups, setMyGroups] = useState([]);
-  const [selectedGroup, setSelectedGroup] = useState(null);
-  const [showCreateGroup, setShowCreateGroup] = useState(false);
-  const [newGroupName, setNewGroupName] = useState("");
-  const [users, setUsers] = useState([]);
-  const [selectedUser, setSelectedUser] = useState("");
-
-  const [assignments, setAssignments] = useState([]);
-  const [selectedAssignment, setSelectedAssignment] = useState(null);
-  const [submissions, setSubmissions] = useState([]);
-  const [showSubmitModal, setShowSubmitModal] = useState(false);
-  const [submitStep, setSubmitStep] = useState(1);
-  const [selectedGroupForSubmit, setSelectedGroupForSubmit] = useState("");
-
-  const [loading, setLoading] = useState(false);
+  const [courses, setCourses] = useState([]);
+  const [analytics, setAnalytics] = useState(null);
+  const [upcomingAssignments, setUpcomingAssignments] = useState([]);
+  const [loading, setLoading] = useState(true);
   const [message, setMessage] = useState({ type: "", text: "" });
 
   useEffect(() => {
-    fetchMyGroups();
-    fetchAssignments();
-    fetchUsers();
-    fetchSubmissions();
+    fetchData();
   }, []);
 
-  useEffect(() => {
-    if (selectedGroup) {
-      fetchGroupDetails(selectedGroup.id);
-    }
-  }, [selectedGroup]);
-
-  // ADD THIS: Refresh users when Groups tab is active
-  useEffect(() => {
-    if (activeTab === "groups") {
-      fetchUsers();
-    }
-  }, [activeTab]);
-
-  const fetchMyGroups = async () => {
+  const fetchData = async () => {
+    setLoading(true);
     try {
-      const response = await axios.get(`${API_URL}/api/groups/user/my-groups`);
-      setMyGroups(response.data);
-    } catch (error) {
-      console.error("Error fetching groups:", error);
-    }
-  };
+      // Fetch enrolled courses
+      const coursesRes = await axios.get(`${API_URL}/api/courses`);
+      // console.log("📚 Courses API Response:", coursesRes.data);
+      // console.log("📚 Number of courses:", coursesRes.data.length);
+      setCourses(coursesRes.data);
 
-  const fetchGroupDetails = async (groupId) => {
-    try {
-      const response = await axios.get(`${API_URL}/api/groups/${groupId}`);
-      setSelectedGroup(response.data);
-    } catch (error) {
-      console.error("Error fetching group details:", error);
-    }
-  };
-
-  const fetchUsers = async () => {
-    try {
-      const response = await axios.get(`${API_URL}/api/users`);
-      setUsers(response.data.filter((u) => u.role === "student"));
-    } catch (error) {
-      console.error("Error fetching users:", error);
-    }
-  };
-
-  const fetchAssignments = async () => {
-    try {
-      const response = await axios.get(`${API_URL}/api/assignments`);
-      setAssignments(response.data);
-    } catch (error) {
-      console.error("Error fetching assignments:", error);
-    }
-  };
-
-  const fetchSubmissions = async () => {
-    try {
-      const response = await axios.get(
-        `${API_URL}/api/submissions/my-submissions`
+      // Fetch student analytics
+      const analyticsRes = await axios.get(
+        `${API_URL}/api/analytics/student/dashboard`
       );
-      setSubmissions(response.data);
-    } catch (error) {
-      console.error("Error fetching submissions:", error);
-    }
-  };
+      // console.log("📊 Analytics API Response:", analyticsRes.data);
+      setAnalytics(analyticsRes.data);
 
-  const handleCreateGroup = async (e) => {
-    e.preventDefault();
-    setLoading(true);
-    try {
-      await axios.post(`${API_URL}/api/groups`, { name: newGroupName });
-      setMessage({ type: "success", text: "Group created successfully!" });
-      setNewGroupName("");
-      setShowCreateGroup(false);
-      fetchMyGroups();
-    } catch (error) {
-      setMessage({
-        type: "error",
-        text: error.response?.data?.error || "Failed to create group",
-      });
-    }
-    setLoading(false);
-  };
-
-  const handleAddMember = async () => {
-    if (!selectedUser || !selectedGroup) return;
-
-    setLoading(true);
-    try {
-      await axios.post(`${API_URL}/api/groups/${selectedGroup.id}/members`, {
-        userId: selectedUser,
-      });
-      setMessage({ type: "success", text: "Member added successfully!" });
-      setSelectedUser("");
-      fetchGroupDetails(selectedGroup.id);
-      fetchUsers(); // Refresh user list after adding
-    } catch (error) {
-      setMessage({
-        type: "error",
-        text: error.response?.data?.error || "Failed to add member",
-      });
-    }
-    setLoading(false);
-  };
-
-  const handleRemoveMember = async (userId) => {
-    if (!window.confirm("Are you sure you want to remove this member?")) return;
-
-    setLoading(true);
-    try {
-      await axios.delete(
-        `${API_URL}/api/groups/${selectedGroup.id}/members/${userId}`
-      );
-      setMessage({ type: "success", text: "Member removed successfully!" });
-      fetchGroupDetails(selectedGroup.id);
-      fetchUsers(); // Refresh user list after removing
-    } catch (error) {
-      setMessage({
-        type: "error",
-        text: error.response?.data?.error || "Failed to remove member",
-      });
-    }
-    setLoading(false);
-  };
-
-  const handleSubmitAssignment = async () => {
-    if (!selectedAssignment || !selectedGroupForSubmit) {
-      setMessage({ type: "error", text: "Please select a group" });
-      return;
-    }
-
-    setLoading(true);
-    try {
-      const status = submitStep === 1 ? "pending" : "confirmed";
-      await axios.post(`${API_URL}/api/submissions`, {
-        assignment_id: selectedAssignment.id,
-        group_id: selectedGroupForSubmit,
-        status,
-      });
-
-      if (submitStep === 1) {
-        setSubmitStep(2);
-        setMessage({ type: "info", text: "Please confirm your submission" });
-      } else {
-        setMessage({
-          type: "success",
-          text: "Assignment submitted successfully!",
-        });
-        setShowSubmitModal(false);
-        setSubmitStep(1);
-        setSelectedGroupForSubmit("");
-        setSelectedAssignment(null);
-        fetchSubmissions();
+      // Get upcoming assignments
+      if (analyticsRes.data.upcomingAssignments) {
+        setUpcomingAssignments(analyticsRes.data.upcomingAssignments);
       }
     } catch (error) {
-      setMessage({
-        type: "error",
-        text: error.response?.data?.error || "Submission failed",
-      });
+      console.error("Error fetching data:", error);
+      setMessage({ type: "error", text: "Failed to load dashboard data" });
+    } finally {
+      setLoading(false);
     }
-    setLoading(false);
   };
 
-  const calculateGroupProgress = (groupId) => {
-    if (assignments.length === 0) return 0;
-    const confirmed = submissions.filter(
-      (s) => s.group_id === groupId && s.status === "confirmed"
-    ).length;
-    return Math.round((confirmed / assignments.length) * 100);
+  const handleEnrollCourse = () => {
+    // In a real app, this would show a modal to enter course code
+    setMessage({
+      type: "info",
+      text: "Course enrollment feature - contact your professor for course codes",
+    });
   };
+
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
+        <LoadingSpinner text="Loading your courses..." />
+      </div>
+    );
+  }
 
   return (
-    <div className="min-h-screen bg-gray-100">
-      <div className="bg-white shadow">
-        <div className="max-w-7xl mx-auto px-4 py-4 sm:px-6 lg:px-8 flex justify-between items-center">
-          <div>
-            <h1 className="text-2xl font-bold text-gray-900">
-              Student Dashboard
-            </h1>
-            <p className="text-gray-600">Welcome, {user?.name}</p>
+    <div className="min-h-screen bg-gray-50">
+      {/* Header */}
+      <div className="bg-white shadow-sm border-b border-gray-200">
+        <div className="max-w-7xl mx-auto px-4 py-6 sm:px-6 lg:px-8">
+          <div className="flex justify-between items-center">
+            <div>
+              <motion.h1
+                initial={{ opacity: 0, x: -20 }}
+                animate={{ opacity: 1, x: 0 }}
+                className="text-3xl font-bold text-gray-900"
+              >
+                Welcome back, {user?.name?.split(" ")[0]}! 👋
+              </motion.h1>
+              <p className="text-gray-600 mt-1">
+                Ready to learn something new today?
+              </p>
+            </div>
+            <motion.button
+              whileHover={{ scale: 1.05 }}
+              whileTap={{ scale: 0.95 }}
+              onClick={logout}
+              className="px-4 py-2 bg-red-500 text-white rounded-lg hover:bg-red-600 font-semibold shadow-md"
+            >
+              Logout
+            </motion.button>
           </div>
-          <button
-            onClick={logout}
-            className="px-4 py-2 bg-red-500 text-white rounded-lg hover:bg-red-600"
-          >
-            Logout
-          </button>
         </div>
       </div>
 
-      {message.text && (
-        <div className="max-w-7xl mx-auto px-4 py-4 sm:px-6 lg:px-8">
-          <div
-            className={`p-4 rounded-lg ${
-              message.type === "success"
-                ? "bg-green-100 text-green-800"
-                : message.type === "error"
-                ? "bg-red-100 text-red-800"
-                : "bg-blue-100 text-blue-800"
-            }`}
+      {/* Message Alert */}
+      <AnimatePresence>
+        {message.text && (
+          <motion.div
+            initial={{ opacity: 0, y: -20 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -20 }}
+            className="max-w-7xl mx-auto px-4 py-4 sm:px-6 lg:px-8"
           >
-            {message.text}
-            <button
-              onClick={() => setMessage({ type: "", text: "" })}
-              className="float-right font-bold"
+            <div
+              className={`p-4 rounded-lg ${
+                message.type === "success"
+                  ? "bg-green-100 border-l-4 border-green-500 text-green-800"
+                  : message.type === "error"
+                  ? "bg-red-100 border-l-4 border-red-500 text-red-800"
+                  : "bg-blue-100 border-l-4 border-blue-500 text-blue-800"
+              }`}
             >
-              ×
-            </button>
-          </div>
-        </div>
-      )}
-
-      <div className="max-w-7xl mx-auto px-4 py-6 sm:px-6 lg:px-8">
-        <div className="flex space-x-4 mb-6">
-          <button
-            onClick={() => setActiveTab("assignments")}
-            className={`px-4 py-2 rounded-lg font-semibold ${
-              activeTab === "assignments"
-                ? "bg-blue-500 text-white"
-                : "bg-white text-gray-700 hover:bg-gray-50"
-            }`}
-          >
-            Assignments
-          </button>
-          <button
-            onClick={() => setActiveTab("groups")}
-            className={`px-4 py-2 rounded-lg font-semibold ${
-              activeTab === "groups"
-                ? "bg-blue-500 text-white"
-                : "bg-white text-gray-700 hover:bg-gray-50"
-            }`}
-          >
-            My Groups
-          </button>
-          <button
-            onClick={() => setActiveTab("progress")}
-            className={`px-4 py-2 rounded-lg font-semibold ${
-              activeTab === "progress"
-                ? "bg-blue-500 text-white"
-                : "bg-white text-gray-700 hover:bg-gray-50"
-            }`}
-          >
-            Progress
-          </button>
-        </div>
-
-        {activeTab === "assignments" && (
-          <div className="bg-white rounded-lg shadow p-6">
-            <h2 className="text-xl font-bold mb-4">All Assignments</h2>
-            <div className="space-y-4">
-              {assignments.map((assignment) => (
-                <div
-                  key={assignment.id}
-                  className="border rounded-lg p-4 hover:shadow-md transition"
-                >
-                  <div className="flex justify-between items-start">
-                    <div className="flex-1">
-                      <h3 className="text-lg font-semibold">
-                        {assignment.title}
-                      </h3>
-                      <p className="text-gray-600 mt-1">
-                        {assignment.description}
-                      </p>
-                      <p className="text-sm text-gray-500 mt-2">
-                        Due:{" "}
-                        {new Date(assignment.due_date).toLocaleDateString()}
-                      </p>
-                      {assignment.onedrive_link && (
-                        <a
-                          href={assignment.onedrive_link}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="text-blue-500 hover:underline text-sm mt-2 inline-block"
-                        >
-                          View OneDrive Link →
-                        </a>
-                      )}
-                    </div>
-                    <button
-                      onClick={() => {
-                        setSelectedAssignment(assignment);
-                        setShowSubmitModal(true);
-                      }}
-                      className="px-4 py-2 bg-green-500 text-white rounded-lg hover:bg-green-600"
-                    >
-                      Submit
-                    </button>
-                  </div>
-                </div>
-              ))}
-              {assignments.length === 0 && (
-                <p className="text-center text-gray-500 py-8">
-                  No assignments available
-                </p>
-              )}
-            </div>
-          </div>
-        )}
-
-        {activeTab === "groups" && (
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-            <div className="bg-white rounded-lg shadow p-6">
-              <div className="flex justify-between items-center mb-4">
-                <h2 className="text-xl font-bold">My Groups</h2>
+              <div className="flex justify-between items-center">
+                <p className="font-medium">{message.text}</p>
                 <button
-                  onClick={() => setShowCreateGroup(true)}
-                  className="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600"
+                  onClick={() => setMessage({ type: "", text: "" })}
+                  className="text-lg font-bold"
                 >
-                  + Create Group
+                  ×
                 </button>
               </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
-              {showCreateGroup && (
-                <form
-                  onSubmit={handleCreateGroup}
-                  className="mb-4 p-4 bg-gray-50 rounded-lg"
-                >
-                  <input
-                    type="text"
-                    value={newGroupName}
-                    onChange={(e) => setNewGroupName(e.target.value)}
-                    placeholder="Enter group name"
-                    className="w-full px-3 py-2 border rounded-lg mb-2"
-                    required
-                  />
-                  <div className="flex space-x-2">
-                    <button
-                      type="submit"
-                      disabled={loading}
-                      className="px-4 py-2 bg-green-500 text-white rounded-lg hover:bg-green-600"
-                    >
-                      Create
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setShowCreateGroup(false)}
-                      className="px-4 py-2 bg-gray-500 text-white rounded-lg hover:bg-gray-600"
-                    >
-                      Cancel
-                    </button>
-                  </div>
-                </form>
-              )}
-
-              <div className="space-y-3">
-                {myGroups.map((group) => (
-                  <div
-                    key={group.id}
-                    onClick={() => setSelectedGroup(group)}
-                    className={`p-4 border rounded-lg cursor-pointer transition ${
-                      selectedGroup?.id === group.id
-                        ? "border-blue-500 bg-blue-50"
-                        : "hover:bg-gray-50"
-                    }`}
+      {/* Analytics Overview Cards */}
+      {analytics && (
+        <div className="max-w-7xl mx-auto px-4 py-6 sm:px-6 lg:px-8">
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-6 mb-6">
+            <motion.div
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: 0.1 }}
+              className="card"
+            >
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="text-gray-600 text-sm font-medium">
+                    Enrolled Courses
+                  </p>
+                  <p className="text-3xl font-bold text-blue-600 mt-2">
+                    {analytics.totalCourses}
+                  </p>
+                </div>
+                <div className="p-3 bg-blue-100 rounded-full">
+                  <svg
+                    className="w-8 h-8 text-blue-600"
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
                   >
-                    <h3 className="font-semibold">{group.name}</h3>
-                    <p className="text-sm text-gray-600">
-                      {group.member_count} member(s)
-                    </p>
-                  </div>
-                ))}
-                {myGroups.length === 0 && (
-                  <p className="text-center text-gray-500 py-8">
-                    No groups yet. Create one!
-                  </p>
-                )}
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth={2}
+                      d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253"
+                    />
+                  </svg>
+                </div>
               </div>
-            </div>
+            </motion.div>
 
-            <div className="bg-white rounded-lg shadow p-6">
-              <h2 className="text-xl font-bold mb-4">Group Details</h2>
-              {selectedGroup ? (
-                <>
-                  <h3 className="text-lg font-semibold mb-2">
-                    {selectedGroup.name}
-                  </h3>
-                  <p className="text-sm text-gray-600 mb-4">
-                    Created by: {selectedGroup.creator_name}
+            <motion.div
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: 0.2 }}
+              className="card"
+            >
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="text-gray-600 text-sm font-medium">
+                    Total Assignments
                   </p>
+                  <p className="text-3xl font-bold text-purple-600 mt-2">
+                    {analytics.totalAssignments}
+                  </p>
+                </div>
+                <div className="p-3 bg-purple-100 rounded-full">
+                  <svg
+                    className="w-8 h-8 text-purple-600"
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth={2}
+                      d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"
+                    />
+                  </svg>
+                </div>
+              </div>
+            </motion.div>
 
-                  <div className="mb-4">
-                    <h4 className="font-semibold mb-2">Add Member</h4>
-                    <div className="flex space-x-2">
-                      <select
-                        value={selectedUser}
-                        onChange={(e) => setSelectedUser(e.target.value)}
-                        className="flex-1 px-3 py-2 border rounded-lg"
-                      >
-                        <option value="">Select a student...</option>
-                        {users
-                          .filter(
-                            (u) =>
-                              !selectedGroup.members?.some((m) => m.id === u.id)
-                          )
-                          .map((u) => (
-                            <option key={u.id} value={u.id}>
-                              {u.name} ({u.email})
-                            </option>
-                          ))}
-                      </select>
-                      <button
-                        onClick={handleAddMember}
-                        disabled={!selectedUser || loading}
-                        className="px-4 py-2 bg-green-500 text-white rounded-lg hover:bg-green-600 disabled:opacity-50"
-                      >
-                        Add
-                      </button>
-                    </div>
-                    {users.filter(
-                      (u) => !selectedGroup.members?.some((m) => m.id === u.id)
-                    ).length === 0 && (
-                      <p className="text-sm text-gray-500 mt-2">
-                        All students are already members
-                      </p>
-                    )}
-                  </div>
+            <motion.div
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: 0.3 }}
+              className="card"
+            >
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="text-gray-600 text-sm font-medium">Completed</p>
+                  <p className="text-3xl font-bold text-green-600 mt-2">
+                    {analytics.completedAssignments}
+                  </p>
+                </div>
+                <div className="p-3 bg-green-100 rounded-full">
+                  <svg
+                    className="w-8 h-8 text-green-600"
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth={2}
+                      d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"
+                    />
+                  </svg>
+                </div>
+              </div>
+            </motion.div>
 
-                  <div>
-                    <h4 className="font-semibold mb-2">Members</h4>
-                    <div className="space-y-2">
-                      {selectedGroup.members?.map((member) => (
-                        <div
-                          key={member.id}
-                          className="flex justify-between items-center p-2 bg-gray-50 rounded"
-                        >
-                          <div>
-                            <p className="font-medium">{member.name}</p>
-                            <p className="text-sm text-gray-600">
-                              {member.email}
-                            </p>
-                          </div>
-                          {selectedGroup.created_by === user.id &&
-                            member.id !== user.id && (
-                              <button
-                                onClick={() => handleRemoveMember(member.id)}
-                                className="px-3 py-1 bg-red-500 text-white rounded hover:bg-red-600 text-sm"
-                              >
-                                Remove
-                              </button>
-                            )}
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                </>
-              ) : (
-                <p className="text-center text-gray-500 py-8">
-                  Select a group to view details
-                </p>
-              )}
-            </div>
+            <motion.div
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: 0.4 }}
+              className="card"
+            >
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="text-gray-600 text-sm font-medium">
+                    Overall Progress
+                  </p>
+                  <p className="text-3xl font-bold text-orange-600 mt-2">
+                    {Math.round(analytics.overallProgress)}%
+                  </p>
+                </div>
+                <div className="p-3 bg-orange-100 rounded-full">
+                  <svg
+                    className="w-8 h-8 text-orange-600"
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth={2}
+                      d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6"
+                    />
+                  </svg>
+                </div>
+              </div>
+            </motion.div>
           </div>
-        )}
 
-        {activeTab === "progress" && (
-          <div className="bg-white rounded-lg shadow p-6">
-            <h2 className="text-xl font-bold mb-4">Group Progress</h2>
-            <div className="space-y-6">
-              {myGroups.map((group) => {
-                const progress = calculateGroupProgress(group.id);
-                return (
-                  <div key={group.id} className="border rounded-lg p-4">
-                    <h3 className="font-semibold mb-2">{group.name}</h3>
-                    <div className="flex items-center space-x-4">
-                      <div className="flex-1">
-                        <div className="w-full bg-gray-200 rounded-full h-4">
-                          <div
-                            className="bg-blue-500 h-4 rounded-full transition-all"
-                            style={{ width: `${progress}%` }}
-                          />
-                        </div>
-                      </div>
-                      <span className="text-lg font-bold">{progress}%</span>
-                    </div>
-                    <p className="text-sm text-gray-600 mt-2">
-                      {
-                        submissions.filter(
-                          (s) =>
-                            s.group_id === group.id && s.status === "confirmed"
-                        ).length
-                      }{" "}
-                      of {assignments.length} assignments completed
-                    </p>
-                  </div>
-                );
-              })}
-              {myGroups.length === 0 && (
-                <p className="text-center text-gray-500 py-8">
-                  Join a group to track progress
-                </p>
-              )}
-            </div>
-          </div>
-        )}
-      </div>
-
-      {showSubmitModal && selectedAssignment && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-white rounded-lg p-6 max-w-md w-full mx-4">
-            <h3 className="text-xl font-bold mb-4">Submit Assignment</h3>
-            <p className="mb-2">
-              <strong>Assignment:</strong> {selectedAssignment.title}
+          {/* Overall Progress Bar */}
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.5 }}
+            className="card mb-6"
+          >
+            <h3 className="text-lg font-semibold text-gray-900 mb-4">
+              Overall Progress
+            </h3>
+            <ProgressBar progress={analytics.overallProgress} height="h-6" />
+            <p className="text-sm text-gray-600 mt-2">
+              {analytics.completedAssignments} of {analytics.totalAssignments}{" "}
+              assignments completed
             </p>
-
-            {submitStep === 1 && (
-              <>
-                <p className="mb-4 text-sm text-gray-600">
-                  Select your group and confirm submission
-                </p>
-                <select
-                  value={selectedGroupForSubmit}
-                  onChange={(e) => setSelectedGroupForSubmit(e.target.value)}
-                  className="w-full px-3 py-2 border rounded-lg mb-4"
-                  required
-                >
-                  <option value="">Select a group...</option>
-                  {myGroups.map((g) => (
-                    <option key={g.id} value={g.id}>
-                      {g.name}
-                    </option>
-                  ))}
-                </select>
-                <p className="mb-4 text-sm">
-                  Have you uploaded your work to OneDrive?
-                </p>
-              </>
-            )}
-
-            {submitStep === 2 && (
-              <div className="mb-4 p-4 bg-yellow-50 border border-yellow-200 rounded">
-                <p className="font-semibold mb-2">⚠️ Final Confirmation</p>
-                <p className="text-sm">
-                  Are you sure you want to confirm this submission? This action
-                  marks the assignment as completed.
-                </p>
-              </div>
-            )}
-
-            <div className="flex space-x-2">
-              <button
-                onClick={handleSubmitAssignment}
-                disabled={
-                  loading || (!selectedGroupForSubmit && submitStep === 1)
-                }
-                className="flex-1 px-4 py-2 bg-green-500 text-white rounded-lg hover:bg-green-600 disabled:opacity-50"
-              >
-                {loading
-                  ? "Processing..."
-                  : submitStep === 1
-                  ? "Yes, I have submitted"
-                  : "Confirm Submission"}
-              </button>
-              <button
-                onClick={() => {
-                  setShowSubmitModal(false);
-                  setSubmitStep(1);
-                  setSelectedGroupForSubmit("");
-                  setSelectedAssignment(null);
-                }}
-                className="px-4 py-2 bg-gray-500 text-white rounded-lg hover:bg-gray-600"
-              >
-                Cancel
-              </button>
-            </div>
-          </div>
+          </motion.div>
         </div>
       )}
+
+      {/* Tabs */}
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+        <div className="flex space-x-4 mb-6 border-b border-gray-200">
+          {["courses", "assignments", "progress"].map((tab) => (
+            <motion.button
+              key={tab}
+              whileHover={{ scale: 1.05 }}
+              whileTap={{ scale: 0.95 }}
+              onClick={() => setActiveTab(tab)}
+              className={`px-6 py-3 font-semibold capitalize transition-all ${
+                activeTab === tab
+                  ? "text-blue-600 border-b-2 border-blue-600"
+                  : "text-gray-600 hover:text-gray-900"
+              }`}
+            >
+              {tab}
+            </motion.button>
+          ))}
+        </div>
+
+        {/* Courses Tab */}
+        {activeTab === "courses" && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            transition={{ duration: 0.3 }}
+          >
+            <div className="flex justify-between items-center mb-6">
+              <h2 className="text-2xl font-bold text-gray-900">My Courses</h2>
+              <motion.button
+                whileHover={{ scale: 1.05 }}
+                whileTap={{ scale: 0.95 }}
+                onClick={handleEnrollCourse}
+                className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-semibold shadow-md"
+              >
+                + Enroll in Course
+              </motion.button>
+            </div>
+
+            {courses.length === 0 ? (
+              <EmptyState
+                icon={
+                  <svg
+                    className="w-24 h-24"
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth={2}
+                      d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253"
+                    />
+                  </svg>
+                }
+                title="No Courses Yet"
+                description="You haven't enrolled in any courses yet. Contact your professor to get course codes."
+                actionLabel="Learn More"
+                onAction={handleEnrollCourse}
+              />
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 pb-8">
+                {courses.map((course, index) => (
+                  <motion.div
+                    key={course._id || course.id}
+                    initial={{ opacity: 0, y: 20 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{ delay: index * 0.1 }}
+                  >
+                    <CourseCard course={course} role="student" />
+                  </motion.div>
+                ))}
+              </div>
+            )}
+          </motion.div>
+        )}
+
+        {/* Upcoming Assignments Tab */}
+        {activeTab === "assignments" && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            transition={{ duration: 0.3 }}
+            className="pb-8"
+          >
+            <h2 className="text-2xl font-bold text-gray-900 mb-6">
+              Upcoming Assignments
+            </h2>
+
+            {upcomingAssignments.length === 0 ? (
+              <EmptyState
+                icon={
+                  <svg
+                    className="w-24 h-24"
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth={2}
+                      d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"
+                    />
+                  </svg>
+                }
+                title="All Caught Up!"
+                description="You don't have any upcoming assignments. Great job!"
+              />
+            ) : (
+              <div className="space-y-4">
+                {upcomingAssignments.map((assignment, index) => (
+                  <motion.div
+                    key={assignment.id}
+                    initial={{ opacity: 0, x: -20 }}
+                    animate={{ opacity: 1, x: 0 }}
+                    transition={{ delay: index * 0.1 }}
+                    className="card card-hover cursor-pointer"
+                    onClick={() => navigate(`/assignment/${assignment.id}`)}
+                  >
+                    <div className="flex justify-between items-start">
+                      <div className="flex-1">
+                        <h3 className="text-lg font-semibold text-gray-900">
+                          {assignment.title}
+                        </h3>
+                        <p className="text-sm text-gray-600 mt-1 capitalize">
+                          {assignment.type} Assignment
+                        </p>
+                        <div className="flex items-center space-x-2 mt-2">
+                          <svg
+                            className="w-4 h-4 text-gray-500"
+                            fill="none"
+                            stroke="currentColor"
+                            viewBox="0 0 24 24"
+                          >
+                            <path
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                              strokeWidth={2}
+                              d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"
+                            />
+                          </svg>
+                          <span className="text-sm text-gray-600">
+                            Due:{" "}
+                            {new Date(assignment.dueDate).toLocaleDateString()}
+                          </span>
+                        </div>
+                      </div>
+                      <span className="badge badge-warning">Pending</span>
+                    </div>
+                  </motion.div>
+                ))}
+              </div>
+            )}
+          </motion.div>
+        )}
+
+        {/* Progress Tab */}
+        {activeTab === "progress" && analytics && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            transition={{ duration: 0.3 }}
+            className="pb-8"
+          >
+            <h2 className="text-2xl font-bold text-gray-900 mb-6">
+              Course Progress
+            </h2>
+
+            {analytics.progressByCourse &&
+            analytics.progressByCourse.length > 0 ? (
+              <div className="space-y-6">
+                {analytics.progressByCourse.map((course, index) => (
+                  <motion.div
+                    key={course.courseId}
+                    initial={{ opacity: 0, y: 20 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{ delay: index * 0.1 }}
+                    className="card"
+                  >
+                    <div className="flex justify-between items-start mb-4">
+                      <div>
+                        <h3 className="text-lg font-semibold text-gray-900">
+                          {course.courseName}
+                        </h3>
+                        <p className="text-sm text-gray-600">
+                          {course.courseCode}
+                        </p>
+                      </div>
+                      <span className="text-2xl font-bold text-blue-600">
+                        {Math.round(course.progress)}%
+                      </span>
+                    </div>
+                    <ProgressBar progress={course.progress} />
+                    <p className="text-sm text-gray-600 mt-2">
+                      {course.completedAssignments} of {course.totalAssignments}{" "}
+                      assignments completed
+                    </p>
+                  </motion.div>
+                ))}
+              </div>
+            ) : (
+              <EmptyState
+                icon={
+                  <svg
+                    className="w-24 h-24"
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth={2}
+                      d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"
+                    />
+                  </svg>
+                }
+                title="No Progress Data"
+                description="Enroll in courses to see your progress"
+              />
+            )}
+          </motion.div>
+        )}
+      </div>
     </div>
   );
 };

@@ -1,79 +1,38 @@
-const { Pool } = require("pg");
+const mongoose = require("mongoose");
 
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-});
-
-const initDatabase = async () => {
-  const client = await pool.connect();
+const connectDatabase = async () => {
   try {
-    // Create users table
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS users (
-        id SERIAL PRIMARY KEY,
-        email VARCHAR(255) UNIQUE NOT NULL,
-        password VARCHAR(255) NOT NULL,
-        name VARCHAR(255) NOT NULL,
-        role VARCHAR(50) NOT NULL CHECK (role IN ('student', 'admin')),
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      );
-    `);
+    const options = {
+      useNewUrlParser: true,
+      useUnifiedTopology: true,
+      serverSelectionTimeoutMS: 5000,
+      socketTimeoutMS: 45000,
+    };
 
-    // Create groups table
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS groups (
-        id SERIAL PRIMARY KEY,
-        name VARCHAR(255) NOT NULL,
-        created_by INTEGER REFERENCES users(id) ON DELETE CASCADE,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      );
-    `);
+    const conn = await mongoose.connect(process.env.MONGODB_URI, options);
 
-    // Create group_members table
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS group_members (
-        id SERIAL PRIMARY KEY,
-        group_id INTEGER REFERENCES groups(id) ON DELETE CASCADE,
-        user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
-        joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE(group_id, user_id)
-      );
-    `);
+    console.log(`✅ MongoDB Connected: ${conn.connection.host}`);
+    console.log(`📊 Database: ${conn.connection.name}`);
 
-    // Create assignments table
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS assignments (
-        id SERIAL PRIMARY KEY,
-        title VARCHAR(255) NOT NULL,
-        description TEXT,
-        due_date TIMESTAMP NOT NULL,
-        onedrive_link TEXT,
-        created_by INTEGER REFERENCES users(id) ON DELETE CASCADE,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      );
-    `);
+    // Handle connection events
+    mongoose.connection.on("error", (err) => {
+      console.error("❌ MongoDB connection error:", err);
+    });
 
-    // Create submissions table
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS submissions (
-        id SERIAL PRIMARY KEY,
-        assignment_id INTEGER REFERENCES assignments(id) ON DELETE CASCADE,
-        group_id INTEGER REFERENCES groups(id) ON DELETE CASCADE,
-        user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
-        status VARCHAR(50) NOT NULL CHECK (status IN ('pending', 'confirmed')),
-        submitted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        confirmed_at TIMESTAMP,
-        UNIQUE(assignment_id, group_id)
-      );
-    `);
+    mongoose.connection.on("disconnected", () => {
+      console.log("⚠️  MongoDB disconnected");
+    });
 
-    console.log("Database tables initialized successfully");
+    // Graceful shutdown
+    process.on("SIGINT", async () => {
+      await mongoose.connection.close();
+      console.log("MongoDB connection closed due to app termination");
+      process.exit(0);
+    });
   } catch (error) {
-    console.error("Error initializing database:", error);
-    throw error;
-  } finally {
-    client.release();
+    console.error(`❌ Error connecting to MongoDB: ${error.message}`);
+    process.exit(1);
   }
 };
 
-module.exports = { pool, initDatabase };
+module.exports = { connectDatabase };

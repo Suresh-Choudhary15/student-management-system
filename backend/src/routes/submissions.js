@@ -1,183 +1,371 @@
 const express = require("express");
 const router = express.Router();
-const { pool } = require("../config/database");
+const Submission = require("../models/Submission");
+const Assignment = require("../models/Assignment");
+const Group = require("../models/Group");
 const { authenticateToken } = require("../middleware/auth");
 
+// Get all submissions (with filters)
 router.get("/", authenticateToken, async (req, res) => {
   try {
-    const result = await pool.query(`
-      SELECT s.*, 
-             a.title as assignment_title,
-             g.name as group_name,
-             u.name as submitted_by_name
-      FROM submissions s
-      LEFT JOIN assignments a ON s.assignment_id = a.id
-      LEFT JOIN groups g ON s.group_id = g.id
-      LEFT JOIN users u ON s.user_id = u.id
-      ORDER BY s.submitted_at DESC
-    `);
-    res.json(result.rows);
+    const { assignmentId, courseId, status } = req.query;
+    let query = {};
+
+    if (assignmentId) {
+      query.assignment = assignmentId;
+    }
+
+    if (status) {
+      query.status = status;
+    }
+
+    // If courseId provided, get assignments for that course first
+    if (courseId) {
+      const Assignment = require("../models/Assignment");
+      const assignments = await Assignment.find({ course: courseId });
+      query.assignment = { $in: assignments.map((a) => a._id) };
+    }
+
+    const submissions = await Submission.find(query)
+      .populate("assignment", "title type dueDate course")
+      .populate("student", "name email")
+      .populate("group", "name leader members")
+      .populate({
+        path: "group",
+        populate: {
+          path: "members leader",
+          select: "name email",
+        },
+      })
+      .populate("acknowledgedBy", "name email")
+      .sort("-submittedAt");
+
+    res.json(submissions);
   } catch (error) {
     console.error("Get submissions error:", error);
     res.status(500).json({ error: "Failed to fetch submissions" });
   }
 });
 
+// Get user's submissions
+router.get("/my-submissions", authenticateToken, async (req, res) => {
+  try {
+    const userId = req.user.id;
+
+    // Get groups user is part of
+    const groups = await Group.find({ members: userId });
+    const groupIds = groups.map((g) => g._id);
+
+    // Get submissions (individual or group)
+    const submissions = await Submission.find({
+      $or: [{ student: userId }, { group: { $in: groupIds } }],
+    })
+      .populate("assignment", "title type dueDate course")
+      .populate({
+        path: "assignment",
+        populate: {
+          path: "course",
+          select: "name code",
+        },
+      })
+      .populate("group", "name leader members")
+      .populate("acknowledgedBy", "name email")
+      .sort("-submittedAt");
+
+    res.json(submissions);
+  } catch (error) {
+    console.error("Get my submissions error:", error);
+    res.status(500).json({ error: "Failed to fetch submissions" });
+  }
+});
+
+// Create or update submission
 router.post("/", authenticateToken, async (req, res) => {
   try {
-    const { assignment_id, group_id, status } = req.body;
+    const { assignmentId, groupId, status, submissionLink } = req.body;
+    const userId = req.user.id;
 
-    if (!assignment_id || !group_id || !status) {
-      return res
-        .status(400)
-        .json({ error: "Assignment ID, Group ID, and status are required" });
+    if (!assignmentId) {
+      return res.status(400).json({ error: "Assignment ID is required" });
     }
 
-    if (!["pending", "confirmed"].includes(status)) {
-      return res.status(400).json({ error: "Invalid status" });
-    }
-
-    const memberCheck = await pool.query(
-      "SELECT * FROM group_members WHERE group_id = $1 AND user_id = $2",
-      [group_id, req.user.id]
+    // Get assignment details
+    const assignment = await Assignment.findById(assignmentId).populate(
+      "course"
     );
+    if (!assignment) {
+      return res.status(404).json({ error: "Assignment not found" });
+    }
 
-    if (memberCheck.rows.length === 0) {
+    // Check if user is enrolled in the course
+    if (!assignment.course.students.includes(userId)) {
       return res
         .status(403)
-        .json({ error: "You are not a member of this group" });
+        .json({ error: "You are not enrolled in this course" });
     }
 
-    const existingSubmission = await pool.query(
-      "SELECT * FROM submissions WHERE assignment_id = $1 AND group_id = $2",
-      [assignment_id, group_id]
-    );
+    let submission;
 
-    let result;
-
-    if (existingSubmission.rows.length > 0) {
-      if (status === "confirmed") {
-        result = await pool.query(
-          `UPDATE submissions 
-           SET status = $1, confirmed_at = CURRENT_TIMESTAMP, user_id = $2
-           WHERE assignment_id = $3 AND group_id = $4
-           RETURNING *`,
-          [status, req.user.id, assignment_id, group_id]
-        );
-      } else {
-        result = await pool.query(
-          `UPDATE submissions 
-           SET status = $1, user_id = $2
-           WHERE assignment_id = $3 AND group_id = $4
-           RETURNING *`,
-          [status, req.user.id, assignment_id, group_id]
-        );
+    // Handle group assignment
+    if (assignment.type === "group") {
+      if (!groupId) {
+        return res
+          .status(400)
+          .json({ error: "Group ID is required for group assignments" });
       }
-    } else {
-      if (status === "confirmed") {
-        result = await pool.query(
-          `INSERT INTO submissions (assignment_id, group_id, user_id, status, confirmed_at)
-           VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP)
-           RETURNING *`,
-          [assignment_id, group_id, req.user.id, status]
-        );
+
+      // Verify group exists and user is a member
+      const group = await Group.findById(groupId);
+      if (!group) {
+        return res.status(404).json({ error: "Group not found" });
+      }
+
+      if (!group.members.includes(userId)) {
+        return res
+          .status(403)
+          .json({ error: "You are not a member of this group" });
+      }
+
+      // Check if trying to acknowledge
+      if (status === "acknowledged") {
+        // Only group leader can acknowledge
+        if (!group.leader.equals(userId)) {
+          return res
+            .status(403)
+            .json({ error: "Only group leader can acknowledge submission" });
+        }
+      }
+
+      // Find or create submission
+      submission = await Submission.findOne({
+        assignment: assignmentId,
+        group: groupId,
+      });
+
+      if (submission) {
+        // Update existing
+        if (status) submission.status = status;
+        if (submissionLink) submission.submissionLink = submissionLink;
+        if (status === "acknowledged") {
+          submission.acknowledgedBy = userId;
+          submission.acknowledgedAt = new Date();
+        }
+        await submission.save();
       } else {
-        result = await pool.query(
-          `INSERT INTO submissions (assignment_id, group_id, user_id, status)
-           VALUES ($1, $2, $3, $4)
-           RETURNING *`,
-          [assignment_id, group_id, req.user.id, status]
-        );
+        // Create new
+        submission = await Submission.create({
+          assignment: assignmentId,
+          group: groupId,
+          status: status || "pending",
+          submissionLink,
+          acknowledgedBy: status === "acknowledged" ? userId : null,
+          acknowledgedAt: status === "acknowledged" ? new Date() : null,
+          submittedAt: new Date(),
+        });
       }
     }
+    // Handle individual assignment
+    else {
+      // Find or create submission
+      submission = await Submission.findOne({
+        assignment: assignmentId,
+        student: userId,
+      });
+
+      if (submission) {
+        // Update existing
+        if (status) submission.status = status;
+        if (submissionLink) submission.submissionLink = submissionLink;
+        if (status === "acknowledged") {
+          submission.acknowledgedBy = userId;
+          submission.acknowledgedAt = new Date();
+        }
+        await submission.save();
+      } else {
+        // Create new
+        submission = await Submission.create({
+          assignment: assignmentId,
+          student: userId,
+          status: status || "pending",
+          submissionLink,
+          acknowledgedBy: status === "acknowledged" ? userId : null,
+          acknowledgedAt: status === "acknowledged" ? new Date() : null,
+          submittedAt: new Date(),
+        });
+      }
+    }
+
+    // Populate for response
+    const populatedSubmission = await Submission.findById(submission._id)
+      .populate("assignment", "title type dueDate")
+      .populate("student", "name email")
+      .populate("group", "name leader members")
+      .populate("acknowledgedBy", "name email");
 
     res.json({
       message:
-        status === "confirmed"
-          ? "Submission confirmed successfully"
-          : "Submission initiated",
-      submission: result.rows[0],
+        status === "acknowledged"
+          ? "Submission acknowledged successfully"
+          : "Submission recorded successfully",
+      submission: populatedSubmission,
     });
   } catch (error) {
     console.error("Submit assignment error:", error);
+
+    // Handle duplicate key error
+    if (error.code === 11000) {
+      return res.status(400).json({ error: "Submission already exists" });
+    }
+
     res.status(500).json({ error: "Failed to submit assignment" });
   }
 });
 
-router.get("/assignment/:id", authenticateToken, async (req, res) => {
+// Get submission by ID
+router.get("/:id", authenticateToken, async (req, res) => {
   try {
-    const { id } = req.params;
+    const submission = await Submission.findById(req.params.id)
+      .populate("assignment", "title type dueDate course")
+      .populate("student", "name email")
+      .populate("group", "name leader members")
+      .populate({
+        path: "group",
+        populate: {
+          path: "members leader",
+          select: "name email",
+        },
+      })
+      .populate("acknowledgedBy", "name email");
 
-    const result = await pool.query(
-      `
-      SELECT s.*, 
-             g.name as group_name,
-             u.name as submitted_by_name
-      FROM submissions s
-      LEFT JOIN groups g ON s.group_id = g.id
-      LEFT JOIN users u ON s.user_id = u.id
-      WHERE s.assignment_id = $1
-      ORDER BY s.submitted_at DESC
-    `,
-      [id]
-    );
+    if (!submission) {
+      return res.status(404).json({ error: "Submission not found" });
+    }
 
-    res.json(result.rows);
+    res.json(submission);
+  } catch (error) {
+    console.error("Get submission error:", error);
+    res.status(500).json({ error: "Failed to fetch submission" });
+  }
+});
+
+// Get submissions by assignment
+router.get("/assignment/:assignmentId", authenticateToken, async (req, res) => {
+  try {
+    const submissions = await Submission.find({
+      assignment: req.params.assignmentId,
+    })
+      .populate("student", "name email")
+      .populate("group", "name leader members")
+      .populate({
+        path: "group",
+        populate: {
+          path: "members",
+          select: "name email",
+        },
+      })
+      .populate("acknowledgedBy", "name email")
+      .sort("-acknowledgedAt");
+
+    res.json(submissions);
   } catch (error) {
     console.error("Get assignment submissions error:", error);
     res.status(500).json({ error: "Failed to fetch submissions" });
   }
 });
 
-router.get("/group/:id", authenticateToken, async (req, res) => {
+// Get submissions by group
+router.get("/group/:groupId", authenticateToken, async (req, res) => {
   try {
-    const { id } = req.params;
+    const submissions = await Submission.find({ group: req.params.groupId })
+      .populate("assignment", "title type dueDate course")
+      .populate({
+        path: "assignment",
+        populate: {
+          path: "course",
+          select: "name code",
+        },
+      })
+      .populate("acknowledgedBy", "name email")
+      .sort("-submittedAt");
 
-    const result = await pool.query(
-      `
-      SELECT s.*, 
-             a.title as assignment_title,
-             a.due_date,
-             u.name as submitted_by_name
-      FROM submissions s
-      LEFT JOIN assignments a ON s.assignment_id = a.id
-      LEFT JOIN users u ON s.user_id = u.id
-      WHERE s.group_id = $1
-      ORDER BY a.due_date DESC
-    `,
-      [id]
-    );
-
-    res.json(result.rows);
+    res.json(submissions);
   } catch (error) {
     console.error("Get group submissions error:", error);
     res.status(500).json({ error: "Failed to fetch submissions" });
   }
 });
 
-router.get("/my-submissions", authenticateToken, async (req, res) => {
+// Update submission (for grading - Admin only)
+router.put("/:id", authenticateToken, async (req, res) => {
   try {
-    const result = await pool.query(
-      `
-      SELECT DISTINCT s.*, 
-             a.title as assignment_title,
-             a.due_date,
-             g.name as group_name
-      FROM submissions s
-      LEFT JOIN assignments a ON s.assignment_id = a.id
-      LEFT JOIN groups g ON s.group_id = g.id
-      WHERE s.group_id IN (
-        SELECT group_id FROM group_members WHERE user_id = $1
-      )
-      ORDER BY a.due_date DESC
-    `,
-      [req.user.id]
-    );
+    const { marks, feedback, status } = req.body;
 
-    res.json(result.rows);
+    const submission = await Submission.findById(req.params.id);
+    if (!submission) {
+      return res.status(404).json({ error: "Submission not found" });
+    }
+
+    // Verify professor owns the course
+    const assignment = await Assignment.findById(
+      submission.assignment
+    ).populate("course");
+    if (!assignment.course.professor.equals(req.user.id)) {
+      return res.status(403).json({ error: "Unauthorized" });
+    }
+
+    // Update submission
+    if (marks !== undefined) submission.marks = marks;
+    if (feedback !== undefined) submission.feedback = feedback;
+    if (status) submission.status = status;
+
+    if (marks !== undefined) {
+      submission.gradedBy = req.user.id;
+      submission.gradedAt = new Date();
+    }
+
+    await submission.save();
+
+    const updatedSubmission = await Submission.findById(submission._id)
+      .populate("assignment", "title type dueDate")
+      .populate("student", "name email")
+      .populate("group", "name leader members")
+      .populate("gradedBy", "name email");
+
+    res.json({
+      message: "Submission updated successfully",
+      submission: updatedSubmission,
+    });
   } catch (error) {
-    console.error("Get my submissions error:", error);
-    res.status(500).json({ error: "Failed to fetch submissions" });
+    console.error("Update submission error:", error);
+    res.status(500).json({ error: "Failed to update submission" });
+  }
+});
+
+// Delete submission
+router.delete("/:id", authenticateToken, async (req, res) => {
+  try {
+    const submission = await Submission.findById(req.params.id);
+    if (!submission) {
+      return res.status(404).json({ error: "Submission not found" });
+    }
+
+    // Students can only delete their own pending submissions
+    if (req.user.role === "student") {
+      const isOwner =
+        submission.student && submission.student.equals(req.user.id);
+      const isPending = submission.status === "pending";
+
+      if (!isOwner || !isPending) {
+        return res.status(403).json({ error: "Cannot delete this submission" });
+      }
+    }
+
+    await Submission.findByIdAndDelete(req.params.id);
+
+    res.json({ message: "Submission deleted successfully" });
+  } catch (error) {
+    console.error("Delete submission error:", error);
+    res.status(500).json({ error: "Failed to delete submission" });
   }
 });
 
